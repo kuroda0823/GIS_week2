@@ -3,6 +3,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import './style.css'
 import * as turf from '@turf/turf'
 
+//地図データの読み込み
 const map = new Map({
   container: 'map',
   style: {
@@ -10,6 +11,7 @@ const map = new Map({
     sources: {
       gsi: {
         type: 'raster',
+        //今回使う地図は「地理院タイル」から取得してる
         tiles: ['https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png'],
         tileSize: 256,
         maxzoom: 18,
@@ -23,6 +25,7 @@ const map = new Map({
   maxZoom: 18,
 })
 
+//右上にズーム、方位のコントロール追加
 map.addControl(new NavigationControl(), 'top-right')
 
 let allParks: any[] = []
@@ -50,6 +53,8 @@ function formatDistance(meters: number): string {
 
 map.on('load', async () => {
   try {
+
+    //公園ファイル(Geojson)読み込み部分
     const response = await fetch('/public_parks.geojson')
     if (!response.ok) throw new Error('GeoJSONの読み込みに失敗しました')
     const geojson = await response.json()
@@ -110,6 +115,7 @@ map.on('load', async () => {
 })
 
 function setupEvents() {
+  //既存の公園をクリックした時のポップアップ
   map.on('click', 'public-parks-layer', (e) => {
     if (!e.features || e.features.length === 0) return
     const feature = e.features[0]
@@ -122,17 +128,26 @@ function setupEvents() {
       .addTo(map)
   })
 
+  //マウスが乗った時のカーソル変更
   map.on('mouseenter', 'public-parks-layer', () => { map.getCanvas().style.cursor = 'pointer' })
   map.on('mouseleave', 'public-parks-layer', () => { map.getCanvas().style.cursor = '' })
 
+  //地図をクリックした時の処理
   map.on('click', (e) => {
     const features = map.queryRenderedFeatures(e.point, { layers: ['public-parks-layer'] })
     if (features.length > 0) return
-    if (!isSimulationMode) return
 
-    const lngLat: [number, number] = [e.lngLat.lng, e.lngLat.lat]
+    let lngLat: [number, number] = [e.lngLat.lng, e.lngLat.lat]
+    
+    // 🌟【テスト用】ここから追加！
+    // どこをクリックしても、強制的にこの座標にピンを置く裏ワザ！
+    // 使う方の「//」を消してね！
+    //lngLat = [133.935, 34.675] // A地点の座標（さっき教えてくれたやつ！）
+    //lngLat = [133.940, 34.680] // B地点の座標（Bの場所に合わせて変えて！）
+    // 🌟ここまで追加！
+
+    //クリック地点に赤いピンを立てる
     clickedPoint = lngLat
-
     if (!clickMarker) {
       clickMarker = new Marker({ color: '#e74c3c' }).setLngLat(lngLat).addTo(map)
     } else {
@@ -140,10 +155,15 @@ function setupEvents() {
     }
 
     document.getElementById('click-info')!.style.display = 'block'
+    
+    // シミュレーション計算（OFFの時は自動でストップするようになってる）
     runSimulation() 
+    
+    // サイドバーの公園リストを距離順に並び替え
     updateParkList()
   })
 
+  //ピン削除ボタンの処理
   document.getElementById('reset-click-btn')?.addEventListener('click', () => {
     clickedPoint = null
     if (clickMarker) {
@@ -155,6 +175,7 @@ function setupEvents() {
     updateParkList()
   })
 
+  //シミュレーションON/OFFボタン押下の処理
   document.getElementById('toggle-sim-btn')?.addEventListener('click', (e) => {
     isSimulationMode = !isSimulationMode
     const btn = e.target as HTMLButtonElement
@@ -175,6 +196,7 @@ function setupEvents() {
     }
   })
 
+  //プルダウンを変えた時の処理(距離圏の変更)
   document.getElementById('sim-radius')?.addEventListener('change', () => {
     if (isSimulationMode) runSimulation()
   })
@@ -193,7 +215,7 @@ function updateParkList() {
   renderList(displayParks)
 }
 
-// ▼ 修正：ビフォーアフターの差分を計算するように変更
+//ビフォーアフターの差分を計算するように変更
 async function runSimulation() {
   if (!isSimulationMode) return
 
@@ -201,11 +223,13 @@ async function runSimulation() {
     const radiusStr = (document.getElementById('sim-radius') as HTMLSelectElement).value
     const currentRadius = parseInt(radiusStr, 10)
 
-    const response = await fetch('/okayama_dummy.geojson')
+    //四角敷き詰めデータ
+    const response = await fetch('/shikaku.geojson')
     const boundaryData = await response.json()
     const boundaryPolygon = boundaryData.features[0]
 
     const bbox = turf.bbox(boundaryPolygon)
+    //0.1km(100m)間隔で点を生成できる
     const grid = turf.pointGrid(bbox, 0.2, { units: 'kilometers' })
 
     const samplePoints: any[] = []
@@ -221,7 +245,7 @@ async function runSimulation() {
         let isVirtualCovered = false
         const ptCoords = currentPoint.geometry.coordinates as [number, number]
 
-        // 1. 元々の公園（ベース）との距離チェック
+        //公園との距離チェック
         for (const park of allParks) {
           const parkCoords = (park.geometry as any).coordinates as [number, number]
           if (calculateDistanceMeters(ptCoords, parkCoords) <= currentRadius) {
@@ -230,14 +254,14 @@ async function runSimulation() {
           }
         }
 
-        // 2. 仮想公園との距離チェック
+        //クリック地点との距離チェック
         if (clickedPoint) {
           if (calculateDistanceMeters(ptCoords, clickedPoint) <= currentRadius) {
             isVirtualCovered = true
           }
         }
 
-        // 最終的な判定
+        //判定
         const isCovered = isBaseCovered || isVirtualCovered
         currentPoint.properties = { color: isCovered ? '#42b883' : '#e74c3c' }
         samplePoints.push(currentPoint)

@@ -1,0 +1,16 @@
+{
+  "memo": "※これはテスト用のデータだよーん",
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": "001", "name": "テスト公園A", "ward": "北区" },
+      "geometry": { "type": "Point", "coordinates": [133.935, 34.675] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "id": "001", "name": "テスト公園A", "ward": "北区" },
+      "geometry": { "type": "Point", "coordinates": [133.935, 34.675] }
+    }
+  ]
+}
