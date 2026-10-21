@@ -33,6 +33,9 @@ let clickedPoint: [number, number] | null = null
 let clickMarker: Marker | null = null
 let isSimulationMode = false
 
+// 🌟ダウンロード用のデータを一時保存する変数
+let currentSimulationData: any = null
+
 function calculateDistanceMeters(coord1: [number, number], coord2: [number, number]): number {
   const [lng1, lat1] = coord1
   const [lng2, lat2] = coord2
@@ -193,12 +196,37 @@ function setupEvents() {
       
       ;(map.getSource('simulation-points-data') as any)?.setData({ type: 'FeatureCollection', features: [] })
       ;(map.getSource('simulation-buffers-data') as any)?.setData({ type: 'FeatureCollection', features: [] })
+      
+      // OFFにした時はダウンロードボタンも隠す
+      const downloadBtn = document.getElementById('download-btn')
+      if (downloadBtn) downloadBtn.style.display = 'none'
     }
   })
 
   //プルダウンを変えた時の処理(距離圏の変更)
   document.getElementById('sim-radius')?.addEventListener('change', () => {
     if (isSimulationMode) runSimulation()
+  })
+
+  // 🌟ダウンロードボタンのクリック処理
+  document.getElementById('download-btn')?.addEventListener('click', () => {
+    if (!currentSimulationData) return
+    
+    // 1. GeoJSON（点ID・最近傍ID・距離・前後判定付きドットデータ）をダウンロード
+    const geoBlob = new Blob([JSON.stringify(currentSimulationData.geoJson, null, 2)], { type: 'application/json' })
+    const geoUrl = URL.createObjectURL(geoBlob)
+    const geoLink = document.createElement('a')
+    geoLink.href = geoUrl
+    geoLink.download = `simulation_points_${Date.now()}.geojson`
+    geoLink.click()
+
+    // 2. JSON（半径・間隔・bbox・データ版・計算日時メタデータ）をダウンロード
+    const metaBlob = new Blob([JSON.stringify(currentSimulationData.metaJson, null, 2)], { type: 'application/json' })
+    const metaUrl = URL.createObjectURL(metaBlob)
+    const metaLink = document.createElement('a')
+    metaLink.href = metaUrl
+    metaLink.download = `simulation_meta_${Date.now()}.json`
+    metaLink.click()
   })
 }
 
@@ -229,8 +257,9 @@ async function runSimulation() {
     const boundaryPolygon = boundaryData.features[0]
 
     const bbox = turf.bbox(boundaryPolygon)
-    //0.1km(100m)間隔で点を生成できる
-    const grid = turf.pointGrid(bbox, 0.2, { units: 'kilometers' })
+    //0.1km(100m)間隔で点を生成できる（現在は0.2km=200m）
+    const gridInterval = 0.2
+    const grid = turf.pointGrid(bbox, gridInterval, { units: 'kilometers' })
 
     const samplePoints: any[] = []
     
@@ -238,33 +267,62 @@ async function runSimulation() {
     let baseCoveredCount = 0 // 元々の公園だけでカバーできている数
     let totalCoveredCount = 0 // 仮想公園も含めてカバーできた数
     let newlyCoveredCount = 0 // 仮想公園のおかげで「新しく」カバーできた数
+    let pointIdCounter = 1 // 🌟点ID用のカウンター
 
     turf.featureEach(grid, function (currentPoint) {
       if (turf.booleanPointInPolygon(currentPoint, boundaryPolygon)) {
-        let isBaseCovered = false
-        let isVirtualCovered = false
         const ptCoords = currentPoint.geometry.coordinates as [number, number]
 
-        //公園との距離チェック
+        // 🌟既存の公園の中で「一番近い公園」と「その距離」を探す
+        let minBaseDist = Infinity
+        let nearestBaseId = "none"
         for (const park of allParks) {
           const parkCoords = (park.geometry as any).coordinates as [number, number]
-          if (calculateDistanceMeters(ptCoords, parkCoords) <= currentRadius) {
-            isBaseCovered = true
-            break
+          const d = calculateDistanceMeters(ptCoords, parkCoords)
+          if (d < minBaseDist) {
+            minBaseDist = d
+            nearestBaseId = park.properties.id || park.properties.name || "不明"
           }
         }
 
+        let isBaseCovered = minBaseDist <= currentRadius
+        let isVirtualCovered = false
+        let virtualDist = Infinity
+
         //クリック地点との距離チェック
         if (clickedPoint) {
-          if (calculateDistanceMeters(ptCoords, clickedPoint) <= currentRadius) {
+          virtualDist = calculateDistanceMeters(ptCoords, clickedPoint)
+          if (virtualDist <= currentRadius) {
             isVirtualCovered = true
           }
         }
 
         //判定
         const isCovered = isBaseCovered || isVirtualCovered
-        currentPoint.properties = { color: isCovered ? '#42b883' : '#e74c3c' }
+
+        // 🌟前後の判定（ステータス）を作成
+        let status = "圏外"
+        if (isBaseCovered) {
+          status = "既存でカバー"
+        } else if (isVirtualCovered) {
+          status = "仮想で新しくカバー"
+        }
+
+        // 🌟仮想公園（追加ピン）も含めた中で最も近いIDと距離を判定
+        const finalDist = Math.min(minBaseDist, virtualDist)
+        const finalNearestId = (finalDist === virtualDist && clickedPoint) ? "仮想公園(追加ピン)" : nearestBaseId
+
+        // 🌟教授の指定データ（点ID・最近傍ID・距離・前後の判定）を持たせる！
+        currentPoint.properties = {
+          color: isCovered ? '#42b883' : '#e74c3c',
+          point_id: `pt_${pointIdCounter}`,
+          nearest_park_id: finalNearestId,
+          distance_m: finalDist,
+          cover_status: status
+        }
+        
         samplePoints.push(currentPoint)
+        pointIdCounter++
 
         // 集計
         if (isBaseCovered) baseCoveredCount++
@@ -310,6 +368,21 @@ async function runSimulation() {
       diffPointsEl.textContent = ''
       diffPercentEl.textContent = ''
     }
+
+    // 🌟ダウンロード用のデータ（GeoJSONと設定JSON）をセットしてボタンを表示！
+    currentSimulationData = {
+      geoJson: turf.featureCollection(samplePoints),
+      metaJson: {
+        radius_m: currentRadius,
+        interval_km: gridInterval,
+        bbox: bbox,
+        data_version: "1.0",
+        calculated_at: new Date().toLocaleString("ja-JP")
+      }
+    }
+
+    const downloadBtn = document.getElementById('download-btn')
+    if (downloadBtn) downloadBtn.style.display = 'block'
 
   } catch (error) {
     console.error("シミュレーションエラー:", error)
